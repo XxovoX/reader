@@ -127,3 +127,17 @@ describe('transport upload contract', () => {
     ).rejects.toThrow(/仅桌面应用可用|不支持/)
   })
 })
+
+
+describe('browser command envelopes', () => {
+  it('unwraps a successful command exactly once in the browser', async () => {
+    vi.resetModules()
+    vi.stubGlobal('window', {})
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      isSuccess: true, errorMsg: '', data: { connected: true },
+    }))))
+    const { invokeEnvelope } = await import('./invoke')
+    await expect(invokeEnvelope('get_version_update', {})).resolves.toEqual({ connected: true })
+    vi.unstubAllGlobals()
+  })
+})

@@ -21,6 +21,7 @@ pub mod assets;
 pub mod control;
 pub mod router;
 pub mod settings;
+mod workspace;
 
 use crate::api::AppState;
 use std::net::SocketAddr;

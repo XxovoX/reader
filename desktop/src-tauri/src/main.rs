@@ -175,6 +175,7 @@ fn main() {
     app.run(|app_handle, event| {
         // 退出前补写最后一次窗口变化, 否则刚调整完尺寸就退出的用户会丢失它。
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            reader_rust::api::commands::hover_reader::persist_hover_reader_geometry(app_handle);
             if let Some(window) = app_handle.get_webview_window("main") {
                 persist_window_state(app_handle, &window, true);
             }

@@ -791,6 +791,45 @@ describe('reader local txt chapters', () => {
     expect(dirty.config.clickAreaProfiles.scroll.mc).toBe('menu')
   })
 
+  it('ignores a delayed progress response after switching books', async () => {
+    const app = useAppStore()
+    const reader = useReaderStore()
+    app.setLegadoWebdavConfig({ url: 'https://dav.example.test/', account: 'test', password: 'test', directory: 'legado' })
+    reader.book = { name: 'A', author: '作者', origin: 'source', bookUrl: 'https://example.test/a' }
+    reader.chapters = [{ title: '第一章', url: 'a0', index: 0 }, { title: '第二章', url: 'a1', index: 1 }]
+    reader.content = 'A body'
+    let resolveSync!: (value: Awaited<ReturnType<typeof syncLegadoBookProgress>>) => void
+    vi.mocked(syncLegadoBookProgress).mockImplementation(() => new Promise(resolve => { resolveSync = resolve }))
+    const task = reader.restoreCurrentBookProgressFromLegado()
+    reader.book = { name: 'B', author: '作者', origin: 'source', bookUrl: 'https://example.test/b' }
+    reader.content = 'B body'
+    resolveSync({ configured: true, uploaded: false, remote: { name: 'A', author: '作者', durChapterIndex: 1, durChapterPos: 3, durChapterTime: 1 } })
+    await task
+    expect(reader.book.name).toBe('B')
+    expect(reader.currentIndex).toBe(0)
+    expect(reader.content).toBe('B body')
+    expect(getBookContent).not.toHaveBeenCalled()
+  })
+
+  it('does not rewind reading when an older in-flight response arrives', async () => {
+    const app = useAppStore()
+    const reader = useReaderStore()
+    app.setLegadoWebdavConfig({ url: 'https://dav.example.test/', account: 'test', password: 'test', directory: 'legado' })
+    reader.book = { name: 'A', author: '作者', origin: 'source', bookUrl: 'https://example.test/a' }
+    reader.chapters = [0, 1, 2].map(index => ({ title: `章${index}`, url: `a${index}`, index }))
+    reader.content = 'first chapter'
+    let resolveSync!: (value: Awaited<ReturnType<typeof syncLegadoBookProgress>>) => void
+    vi.mocked(syncLegadoBookProgress).mockImplementation(() => new Promise(resolve => { resolveSync = resolve }))
+    const task = reader.restoreCurrentBookProgressFromLegado()
+    reader.currentIndex = 2
+    reader.content = 'third chapter'
+    resolveSync({ configured: true, uploaded: false, remote: { name: 'A', author: '作者', durChapterIndex: 1, durChapterPos: 3, durChapterTime: 1 } })
+    await task
+    expect(reader.currentIndex).toBe(2)
+    expect(reader.content).toBe('third chapter')
+    expect(getBookContent).not.toHaveBeenCalled()
+  })
+
   it('updates the open-position snapshot when accepting newer Legado progress', async () => {
     const appStore = useAppStore()
     const readerStore = useReaderStore()

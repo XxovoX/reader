@@ -215,6 +215,7 @@
           :selected-urls="shelfStore.selectedBookUrls"
           :loading="shelfStore.loading"
           :sortable="sortable"
+          :show-hover-action="!appStore.isWebMode"
           :empty-text="shelfEmptyText"
         @click="handleBookClick"
         @info="handleBookInfo"
@@ -222,6 +223,7 @@
         @select="shelfStore.toggleSelection($event.bookUrl)"
         @reorder="handleReorderBooks"
         @contextmenu="handleBookContextMenu"
+        @hover="handleHoverBook"
         />
       </div>
 
@@ -270,6 +272,7 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { invoke } from '@tauri-apps/api/core'
 import { useBookshelfStore } from '../stores/bookshelf'
 import { useReaderStore } from '../stores/reader'
 import { useAppStore } from '../stores/app'
@@ -404,6 +407,21 @@ async function handleBookClick(book: Book | SearchBook) {
     const loadBookTask = readerStore.loadBook(b)
     await router.push('/reader')
     await loadBookTask
+  } finally {
+    openingBookUrl.value = ''
+  }
+}
+
+async function handleHoverBook(book: Book | SearchBook) {
+  const shelfBook = book as Book
+  if (appStore.isWebMode || openingBookUrl.value === shelfBook.bookUrl) return
+  openingBookUrl.value = shelfBook.bookUrl
+  try {
+    void shelfStore.moveBookToFront(shelfBook.bookUrl).catch(() => undefined)
+    await readerStore.loadBook(shelfBook)
+    await invoke('open_hover_reader', { bookUrl: shelfBook.bookUrl })
+  } catch (error) {
+    appStore.showToast((error as Error).message || '无法打开悬浮阅读', 'error')
   } finally {
     openingBookUrl.value = ''
   }

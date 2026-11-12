@@ -21,6 +21,7 @@ export interface BookReadingStats {
 }
 
 export function addReadingStats(params: {
+  eventId?: string
   seconds?: number
   date?: string
   bookUrl?: string

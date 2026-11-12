@@ -86,10 +86,49 @@ impl ReadingStatsService {
         book_name: Option<&str>,
         book_author: Option<&str>,
     ) -> Result<(), AppError> {
+        self.add_reading_once(
+            user_ns,
+            seconds,
+            characters,
+            date,
+            book_url,
+            book_name,
+            book_author,
+            None,
+        )
+        .await
+    }
+
+    /// A durable receipt lets clients safely retry a write after losing its reply.
+    pub async fn add_reading_once(
+        &self,
+        user_ns: &str,
+        seconds: i64,
+        characters: i64,
+        date: Option<&str>,
+        book_url: Option<&str>,
+        book_name: Option<&str>,
+        book_author: Option<&str>,
+        event_id: Option<&str>,
+    ) -> Result<(), AppError> {
         let date = date.map(String::from).unwrap_or_else(Self::today);
         let seconds = seconds.clamp(0, MAX_SECONDS_PER_WRITE);
         let characters = characters.clamp(0, MAX_CHARACTERS_PER_WRITE);
         let mut tx = self.pool.begin().await?;
+        if let Some(id) = event_id.map(str::trim).filter(|id| !id.is_empty()) {
+            let inserted = sqlx::query(
+                "INSERT INTO reading_stats_receipts (user_ns, event_id) VALUES (?1, ?2)
+                 ON CONFLICT(user_ns, event_id) DO NOTHING",
+            )
+            .bind(user_ns)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                tx.commit().await?;
+                return Ok(());
+            }
+        }
         sqlx::query(
             "INSERT INTO reading_stats (user_ns, date, seconds, characters)
              VALUES (?1, ?2, ?3, ?4)
@@ -411,7 +450,7 @@ impl ReadingStatsService {
 
     /// 书架详情页编辑书名/作者后迁移按书统计。
     ///
-    /// 本地书的 `book_url` 是 `md5("{user_ns}:{文件名}:{内容md5}")`(TXT) / 
+    /// 本地书的 `book_url` 是 `md5("{user_ns}:{文件名}:{内容md5}")`(TXT) /
     /// `md5_bytes("{user_ns}:{文件名}:", 内容)`(EPUB)。**文件名参与了哈希**，所以
     /// 在书架里改名不会改变 URL —— 改的只是展示名。这正是本方法存在的理由:
     /// 统计列表按 `(book_name, book_author)` 分组，不改历史行的名字，改名后的
@@ -482,7 +521,101 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(include_str!(
+            "../storage/db/migrations/0009_reading_stats_receipts.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         ReadingStatsService::new(pool)
+    }
+
+    #[tokio::test]
+    async fn failed_transaction_does_not_consume_receipt_or_save_partial_time() {
+        let service = setup_service().await;
+        sqlx::query("CREATE TRIGGER reject_book BEFORE INSERT ON reading_book_stats BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            .execute(&service.pool).await.unwrap();
+        assert!(service
+            .add_reading_once(
+                "default",
+                7,
+                0,
+                Some("2026-11-11"),
+                Some("book-a"),
+                Some("A"),
+                None,
+                Some("event-1")
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            service.get_summary("default").await.unwrap().total_seconds,
+            0
+        );
+        sqlx::query("DROP TRIGGER reject_book")
+            .execute(&service.pool)
+            .await
+            .unwrap();
+        service
+            .add_reading_once(
+                "default",
+                7,
+                0,
+                Some("2026-11-11"),
+                Some("book-a"),
+                Some("A"),
+                None,
+                Some("event-1"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.get_summary("default").await.unwrap().total_seconds,
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn replayed_receipt_does_not_duplicate_daily_or_book_time() {
+        let service = setup_service().await;
+        for _ in 0..3 {
+            service
+                .add_reading_once(
+                    "default",
+                    7,
+                    10,
+                    Some("2026-11-11"),
+                    Some("book-a"),
+                    Some("A"),
+                    None,
+                    Some("event-1"),
+                )
+                .await
+                .unwrap();
+        }
+        service
+            .add_reading_once(
+                "default",
+                3,
+                5,
+                Some("2026-11-11"),
+                Some("book-a"),
+                Some("A"),
+                None,
+                Some("event-2"),
+            )
+            .await
+            .unwrap();
+        let daily = service
+            .get_daily("default", "2026-11-11", "2026-11-11")
+            .await
+            .unwrap();
+        let books = service
+            .get_by_book("default", "2026-11-11", "2026-11-11")
+            .await
+            .unwrap();
+        assert_eq!(daily[0].seconds, 10);
+        assert_eq!(books[0].seconds, 10);
     }
 
     #[tokio::test]
@@ -514,7 +647,10 @@ mod tests {
             seconds: 90,
             characters: 12,
         }];
-        service.replace_all("default", &daily, &book_rows).await.unwrap();
+        service
+            .replace_all("default", &daily, &book_rows)
+            .await
+            .unwrap();
 
         let exported_daily = service.get_all_daily("default").await.unwrap();
         let exported_books = service.get_all_book_rows("default").await.unwrap();
@@ -595,11 +731,27 @@ mod tests {
         let today = ReadingStatsService::today();
         let month_start = format!("{}-01", &today[..7]);
         service
-            .add_reading("default", 120, 0, Some(&today), Some("book-a"), Some("A书"), Some("甲"))
+            .add_reading(
+                "default",
+                120,
+                0,
+                Some(&today),
+                Some("book-a"),
+                Some("A书"),
+                Some("甲"),
+            )
             .await
             .unwrap();
         service
-            .add_reading("default", 60, 0, Some(&month_start), Some("book-b"), Some("B书"), Some("乙"))
+            .add_reading(
+                "default",
+                60,
+                0,
+                Some(&month_start),
+                Some("book-b"),
+                Some("B书"),
+                Some("乙"),
+            )
             .await
             .unwrap();
 
@@ -618,22 +770,54 @@ mod tests {
         let service = setup_service().await;
         // 源 A 的 URL
         service
-            .add_reading("default", 120, 300, Some("2026-08-10"), Some("url-a"), Some("测试书籍"), Some("测试作者"))
+            .add_reading(
+                "default",
+                120,
+                300,
+                Some("2026-08-10"),
+                Some("url-a"),
+                Some("测试书籍"),
+                Some("测试作者"),
+            )
             .await
             .unwrap();
         // 源 B 的 URL (换源后)
         service
-            .add_reading("default", 180, 500, Some("2026-08-11"), Some("url-b"), Some("测试书籍"), Some("测试作者"))
+            .add_reading(
+                "default",
+                180,
+                500,
+                Some("2026-08-11"),
+                Some("url-b"),
+                Some("测试书籍"),
+                Some("测试作者"),
+            )
             .await
             .unwrap();
         // 另一本书
         service
-            .add_reading("default", 60, 100, Some("2026-08-10"), Some("url-c"), Some("凡人修仙"), Some("忘语"))
+            .add_reading(
+                "default",
+                60,
+                100,
+                Some("2026-08-10"),
+                Some("url-c"),
+                Some("凡人修仙"),
+                Some("忘语"),
+            )
             .await
             .unwrap();
 
-        let books = service.get_by_book("default", "2026-08-10", "2026-08-11").await.unwrap();
-        assert_eq!(books.len(), 2, "同一本书换源后应合并成一条, 实际: {:?}", books);
+        let books = service
+            .get_by_book("default", "2026-08-10", "2026-08-11")
+            .await
+            .unwrap();
+        assert_eq!(
+            books.len(),
+            2,
+            "同一本书换源后应合并成一条, 实际: {:?}",
+            books
+        );
         // 时长累加: 120 + 180 = 300
         let doupo = books.iter().find(|b| b.book_name == "测试书籍").unwrap();
         assert_eq!(doupo.seconds, 300);
@@ -646,16 +830,40 @@ mod tests {
     async fn same_book_name_with_legacy_blank_author_merges_into_one_row() {
         let service = setup_service().await;
         service
-            .add_reading("default", 120, 0, Some("2026-08-10"), Some("url-old"), Some("同一本书"), Some(""))
+            .add_reading(
+                "default",
+                120,
+                0,
+                Some("2026-08-10"),
+                Some("url-old"),
+                Some("同一本书"),
+                Some(""),
+            )
             .await
             .unwrap();
         service
-            .add_reading("default", 180, 0, Some("2026-08-11"), Some("url-new"), Some("同一本书"), Some("作者甲"))
+            .add_reading(
+                "default",
+                180,
+                0,
+                Some("2026-08-11"),
+                Some("url-new"),
+                Some("同一本书"),
+                Some("作者甲"),
+            )
             .await
             .unwrap();
 
-        let books = service.get_by_book("default", "2026-08-10", "2026-08-11").await.unwrap();
-        assert_eq!(books.len(), 1, "作者缺失的旧记录应和新记录合并, 实际: {:?}", books);
+        let books = service
+            .get_by_book("default", "2026-08-10", "2026-08-11")
+            .await
+            .unwrap();
+        assert_eq!(
+            books.len(),
+            1,
+            "作者缺失的旧记录应和新记录合并, 实际: {:?}",
+            books
+        );
         assert_eq!(books[0].seconds, 300);
     }
 
@@ -663,22 +871,47 @@ mod tests {
     async fn delete_book_stats_removes_only_target_book() {
         let service = setup_service().await;
         service
-            .add_reading("default", 120, 300, Some("2026-08-08"), Some("book-a"), Some("A书"), Some("甲"))
+            .add_reading(
+                "default",
+                120,
+                300,
+                Some("2026-08-08"),
+                Some("book-a"),
+                Some("A书"),
+                Some("甲"),
+            )
             .await
             .unwrap();
         service
-            .add_reading("default", 90, 200, Some("2026-08-08"), Some("book-b"), Some("B书"), Some("乙"))
+            .add_reading(
+                "default",
+                90,
+                200,
+                Some("2026-08-08"),
+                Some("book-b"),
+                Some("B书"),
+                Some("乙"),
+            )
             .await
             .unwrap();
 
-        let deleted = service.delete_book_stats("default", "book-a").await.unwrap();
+        let deleted = service
+            .delete_book_stats("default", "book-a")
+            .await
+            .unwrap();
         assert_eq!(deleted, 1);
 
-        let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
+        let books = service
+            .get_by_book("default", "2026-08-08", "2026-08-08")
+            .await
+            .unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].book_url, "book-b");
 
-        let daily = service.get_daily("default", "2026-08-08", "2026-08-08").await.unwrap();
+        let daily = service
+            .get_daily("default", "2026-08-08", "2026-08-08")
+            .await
+            .unwrap();
         assert_eq!(daily[0].seconds, 90);
     }
 
@@ -687,15 +920,39 @@ mod tests {
         // 换源后同一本书有多个 book_url, 删除时应全部删除
         let service = setup_service().await;
         service
-            .add_reading("default", 120, 0, Some("2026-08-08"), Some("url-a"), Some("同一本"), Some("同作者"))
+            .add_reading(
+                "default",
+                120,
+                0,
+                Some("2026-08-08"),
+                Some("url-a"),
+                Some("同一本"),
+                Some("同作者"),
+            )
             .await
             .unwrap();
         service
-            .add_reading("default", 180, 0, Some("2026-08-09"), Some("url-b"), Some("同一本"), Some("同作者"))
+            .add_reading(
+                "default",
+                180,
+                0,
+                Some("2026-08-09"),
+                Some("url-b"),
+                Some("同一本"),
+                Some("同作者"),
+            )
             .await
             .unwrap();
         service
-            .add_reading("default", 60, 0, Some("2026-08-08"), Some("url-c"), Some("另一本"), Some("其他作者"))
+            .add_reading(
+                "default",
+                60,
+                0,
+                Some("2026-08-08"),
+                Some("url-c"),
+                Some("另一本"),
+                Some("其他作者"),
+            )
             .await
             .unwrap();
 
@@ -703,7 +960,10 @@ mod tests {
         let deleted = service.delete_book_stats("default", "url-b").await.unwrap();
         assert_eq!(deleted, 2);
 
-        let books = service.get_by_book("default", "2026-08-08", "2026-08-09").await.unwrap();
+        let books = service
+            .get_by_book("default", "2026-08-08", "2026-08-09")
+            .await
+            .unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].book_name, "另一本");
     }
@@ -749,12 +1009,7 @@ mod tests {
             .unwrap();
 
         let updated = service
-            .rename_book_stats(
-                "default",
-                "local-txt:abc",
-                "新书名",
-                "新作者",
-            )
+            .rename_book_stats("default", "local-txt:abc", "新书名", "新作者")
             .await
             .unwrap();
         assert_eq!(updated, 2);
@@ -763,7 +1018,10 @@ mod tests {
             .get_by_book("default", "2026-08-08", "2026-08-09")
             .await
             .unwrap();
-        let renamed = books.iter().find(|book| book.book_url == "local-txt:abc").unwrap();
+        let renamed = books
+            .iter()
+            .find(|book| book.book_url == "local-txt:abc")
+            .unwrap();
         assert_eq!(renamed.book_name, "新书名");
         assert_eq!(renamed.seconds, 300);
         assert!(books.iter().any(|book| book.book_name == "另一本"));
@@ -775,21 +1033,46 @@ mod tests {
         // 这里确保同名一律收敛为一条, 删除时也一次清理全部来源。
         let service = setup_service().await;
         service
-            .add_reading("default", 100, 0, Some("2026-08-08"), Some("url-甲"), Some("同名书"), Some("作者甲"))
+            .add_reading(
+                "default",
+                100,
+                0,
+                Some("2026-08-08"),
+                Some("url-甲"),
+                Some("同名书"),
+                Some("作者甲"),
+            )
             .await
             .unwrap();
         service
-            .add_reading("default", 200, 0, Some("2026-08-08"), Some("url-乙"), Some("同名书"), Some("作者乙"))
+            .add_reading(
+                "default",
+                200,
+                0,
+                Some("2026-08-08"),
+                Some("url-乙"),
+                Some("同名书"),
+                Some("作者乙"),
+            )
             .await
             .unwrap();
 
-        let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
+        let books = service
+            .get_by_book("default", "2026-08-08", "2026-08-08")
+            .await
+            .unwrap();
         assert_eq!(books.len(), 1, "同名记录应合并, 实际: {:?}", books);
         assert_eq!(books[0].seconds, 300);
 
-        let deleted = service.delete_book_stats("default", "url-甲").await.unwrap();
+        let deleted = service
+            .delete_book_stats("default", "url-甲")
+            .await
+            .unwrap();
         assert_eq!(deleted, 2);
-        let books = service.get_by_book("default", "2026-08-08", "2026-08-08").await.unwrap();
+        let books = service
+            .get_by_book("default", "2026-08-08", "2026-08-08")
+            .await
+            .unwrap();
         assert!(books.is_empty());
     }
 }

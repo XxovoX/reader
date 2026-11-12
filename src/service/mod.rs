@@ -18,3 +18,5 @@ pub mod update_service;
 pub mod user_service;
 pub mod voice_cache;
 pub mod webview_cookies;
+
+pub mod legado_reading_time;

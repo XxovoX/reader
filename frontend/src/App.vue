@@ -1,5 +1,7 @@
 <template>
+  <router-view v-if="overlayMode" />
   <div
+    v-else
     class="app-shell"
     :class="{
       'has-custom-background': showCustomBackground,
@@ -53,7 +55,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { listen } from '@tauri-apps/api/event'
 import { useAppStore } from './stores/app'
 import { useReaderStore } from './stores/reader'
@@ -73,14 +75,17 @@ import { resetFullscreenIntent, toggleAppFullscreen } from './composables/useApp
 import { resolveHotkeyAction, type HotkeyActionId } from './utils/readerHotkeys'
 
 const route = useRoute()
+const router = useRouter()
+const overlayMode = computed(() => route.query.mode === 'hover')
 const appStore = useAppStore()
 const readerStore = useReaderStore()
 
-const showHeader = computed(() => route.name !== 'reader' && !appStore.miniMode)
+const workspaceMode = computed(() => route.name === 'workspace' || route.query.mode === 'codex')
+const showHeader = computed(() => route.name !== 'reader' && !workspaceMode.value && !appStore.miniMode)
 /* Web 端不渲染底部导航: 只剩书架和最近阅读两项, 用顶部的书架/最近入口
    就够切换, 底部常驻一条导航反而占掉手机的阅读高度。 */
 const showBottomNav = computed(
-  () => route.name !== 'reader' && !appStore.miniMode && !appStore.isWebMode,
+  () => route.name !== 'reader' && !workspaceMode.value && !appStore.miniMode && !appStore.isWebMode,
 )
 const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
   if (appStore.showSettingsDrawer) return 'settings'
@@ -92,7 +97,7 @@ const titlebarSurface = computed<'settings' | 'reader-panel' | null>(() => {
   if (route.name === 'reader' && readerStore.activePanel) return 'reader-panel'
   return null
 })
-const showCustomBackground = computed(() => Boolean(shellBackgroundImage.value))
+const showCustomBackground = computed(() => !workspaceMode.value && Boolean(shellBackgroundImage.value))
 const shellBackgroundImage = computed(() => {
   const onReader = route.name === 'reader'
   // 不按页面清空参数: 由 resolveShellBackgroundImage 自己按 onReader 分流。
@@ -106,7 +111,7 @@ const shellBackgroundImage = computed(() => {
   }, onReader)
 })
 const appShellStyle = computed(() => ({
-  background: route.name === 'reader'
+  background: workspaceMode.value ? '#fff' : route.name === 'reader'
     ? readerStore.readerTheme.body
     : 'var(--color-bg)',
 }))
@@ -178,13 +183,18 @@ async function consumePendingLegadoDeepLink() {
 }
 
 onMounted(() => {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+  if (overlayMode.value || typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
   void consumePendingLegadoDeepLink()
   listen('legado-deeplink', () => {
     void consumePendingLegadoDeepLink()
   }).then((un) => {
     legadoUnlisten = un
   })
+})
+
+onMounted(() => {
+  if (overlayMode.value || appStore.isWebMode) return
+  void listen('hover-reader-return', () => { void router.replace({ name: 'home' }) })
 })
 
 /** 关闭窗口前的收尾: 把阅读位置落到书架。
@@ -207,7 +217,7 @@ async function persistBeforeClose() {
 }
 
 onMounted(() => {
-  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+  if (overlayMode.value || typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
   listen<unknown>('close-requested', async () => {
     if (handlingCloseRequest) return
     handlingCloseRequest = true

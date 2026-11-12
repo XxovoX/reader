@@ -4,6 +4,7 @@ import { isWebUiMode } from '../api/transport'
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
+    { path: "/workspace", name: "workspace", component: () => import("../views/WorkspaceView.vue") },
     {
       path: '/',
       name: 'home',
@@ -54,9 +55,10 @@ const router = createRouter({
  * 在浏览器里要么整页空(`explore`/`rss` 全靠没有 HTTP 路由的接口), 要么只有
  * 半页数据(`stats` 的按书明细), 与其让人对着空页面猜, 不如退回书架。
  */
-const WEB_ALLOWED_ROUTES = new Set(['home', 'reader', 'recent'])
+const WEB_ALLOWED_ROUTES = new Set(['home', 'reader', 'recent', 'workspace'])
 
 router.beforeEach((to) => {
+  if (!isWebUiMode() && to.name === 'workspace') return { name: 'home' }
   if (!isWebUiMode()) return true
   if (typeof to.name === 'string' && WEB_ALLOWED_ROUTES.has(to.name)) return true
   return { name: 'home' }

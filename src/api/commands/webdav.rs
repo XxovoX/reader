@@ -464,9 +464,11 @@ pub async fn open_webdav_folder(
 }
 
 #[tauri::command]
-pub async fn test_legado_webdav(
-    config: LegadoWebdavConfig,
-) -> Result<ApiResponse<Value>, AppError> {
+pub async fn test_legado_webdav(state: tauri::State<'_, AppState>, config: LegadoWebdavConfig) -> Result<ApiResponse<Value>, AppError> {
+    test_legado_webdav_core(&state, config).await
+}
+
+pub async fn test_legado_webdav_core(_state: &AppState, config: LegadoWebdavConfig) -> Result<ApiResponse<Value>, AppError> {
     let client = webdav_client()?;
     let (directory_urls, root_url) = legado_root_webdav_urls(&config)?;
     ensure_webdav_directories(&client, &directory_urls, &config).await?;
@@ -480,9 +482,11 @@ pub async fn test_legado_webdav(
 }
 
 #[tauri::command]
-pub async fn sync_legado_book_progress(
-    req: LegadoProgressRequest,
-) -> Result<ApiResponse<LegadoProgressResponse>, AppError> {
+pub async fn sync_legado_book_progress(state: tauri::State<'_, AppState>, req: LegadoProgressRequest) -> Result<ApiResponse<LegadoProgressResponse>, AppError> {
+    sync_legado_book_progress_core(&state, req).await
+}
+
+pub async fn sync_legado_book_progress_core(_state: &AppState, req: LegadoProgressRequest) -> Result<ApiResponse<LegadoProgressResponse>, AppError> {
     validate_progress(&req.progress)?;
     let client = webdav_client()?;
     let (_, progress_dir) = ensure_legado_progress_dir(&client, &req.config).await?;
@@ -517,9 +521,11 @@ pub async fn sync_legado_book_progress(
 }
 
 #[tauri::command]
-pub async fn upload_legado_book_progress(
-    req: LegadoProgressRequest,
-) -> Result<ApiResponse<LegadoProgressResponse>, AppError> {
+pub async fn upload_legado_book_progress(state: tauri::State<'_, AppState>, req: LegadoProgressRequest) -> Result<ApiResponse<LegadoProgressResponse>, AppError> {
+    upload_legado_book_progress_core(&state, req).await
+}
+
+pub async fn upload_legado_book_progress_core(_state: &AppState, req: LegadoProgressRequest) -> Result<ApiResponse<LegadoProgressResponse>, AppError> {
     validate_progress(&req.progress)?;
     let client = webdav_client()?;
     let (_, progress_dir) = ensure_legado_progress_dir(&client, &req.config).await?;

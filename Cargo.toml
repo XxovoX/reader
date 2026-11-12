@@ -11,7 +11,7 @@ members = ["desktop/src-tauri"]
 default-members = ["."]
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

@@ -130,8 +130,7 @@ export async function invokeEnvelope<T>(
   const res = await invokeRaw<ApiResponse<T>>(command, args).catch((err) => {
     throw toError(err)
   })
-  if (!res.isSuccess) throw new Error(res.errorMsg || '请求失败')
-  return res.data as T
+  return unwrap<T>(res)
 }
 
 /**

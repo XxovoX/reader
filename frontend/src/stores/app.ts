@@ -343,12 +343,18 @@ export const useAppStore = defineStore('app', () => {
     readChapters: string[]
     completedBooks: string[]
   }>(initialReadingStats)
-  let readingSessionStartedAt = 0
-  let readingSessionPendingSeconds = 0
+  let readingSessionStartedAt: number | null = null
+  // Keep each book's fractional second across hide/show, settlement and book switches.
+  const READING_REMAINDER_PREFIX = 'reader-reading-remainder:'
+  const READING_EVENT_PREFIX = 'reader-reading-event:'
+  type ReadingEvent = Parameters<typeof addReadingStats>[0] & { eventId: string }
+  let readingStatsQueuedFlushes = 0
   let readingSessionBook: { bookUrl: string; bookName: string; bookAuthor: string } | null = null
   const readingSessionActive = ref(false)
   let readingSessionVisibilityBound = false
   let readingSessionHasWindowFocus = true
+  let readingSessionSuspended = false
+  let readingSessionHoverVisible: boolean | null = null
   let readingStatsFlushQueue = Promise.resolve()
 
   /** 单次上报上限: 服务端同样限制 24h, 长会话分段避免整段被截断。 */
@@ -359,9 +365,10 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function readingSessionShouldRun() {
-    if (!readingSessionBook?.bookUrl) return false
-    if (typeof document === 'undefined') return true
-    return document.visibilityState !== 'hidden' && readingSessionHasWindowFocus
+    if (!readingSessionBook?.bookUrl || readingSessionSuspended) return false
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false
+    if (readingSessionHoverVisible !== null) return readingSessionHoverVisible
+    return readingSessionHasWindowFocus
   }
 
   function resumeReadingSessionClock() {
@@ -369,8 +376,8 @@ export const useAppStore = defineStore('app', () => {
       pauseReadingSessionClock()
       return
     }
-    if (!readingSessionStartedAt) {
-      readingSessionStartedAt = Date.now()
+    if (readingSessionStartedAt === null) {
+      readingSessionStartedAt = performance.now()
     }
     readingSessionActive.value = true
   }
@@ -390,7 +397,8 @@ export const useAppStore = defineStore('app', () => {
 
   function handleReadingSessionWindowBlur() {
     readingSessionHasWindowFocus = false
-    pauseReadingSessionClock()
+    // Non-activating overlays deliberately leave keyboard focus in Codex.
+    resumeReadingSessionClock()
   }
 
   function handleReadingSessionWindowFocus() {
@@ -403,46 +411,83 @@ export const useAppStore = defineStore('app', () => {
     document.addEventListener('visibilitychange', handleReadingSessionVisibilityChange)
     window.addEventListener('blur', handleReadingSessionWindowBlur)
     window.addEventListener('focus', handleReadingSessionWindowFocus)
+    window.addEventListener('pagehide', pauseReadingSessionClock)
+    window.addEventListener('beforeunload', pauseReadingSessionClock)
+    window.addEventListener('pageshow', resumeReadingSessionClock)
     readingSessionVisibilityBound = true
   }
 
   function flushReadingSession() {
-    if (!readingSessionStartedAt) return
-    const delta = Math.max(0, Math.round((Date.now() - readingSessionStartedAt) / 1000))
-    readingSessionStartedAt = 0
+    if (readingSessionStartedAt === null || !readingSessionBook) return
+    const book = readingSessionBook
+    const elapsed = Math.max(0, performance.now() - readingSessionStartedAt)
+    readingSessionStartedAt = null
     readingSessionActive.value = false
-    readingSessionPendingSeconds += delta
-    void flushReadingSessionStats()
+    const remainderKey = READING_REMAINDER_PREFIX + book.bookUrl
+    const savedRemainder = Number(localStorage.getItem(remainderKey))
+    const milliseconds = (Number.isFinite(savedRemainder) && savedRemainder >= 0 && savedRemainder < 1000 ? savedRemainder : 0) + elapsed
+    const seconds = Math.floor(milliseconds / 1000)
+    localStorage.setItem(remainderKey, String(milliseconds - seconds * 1000))
+    if (seconds > 0) flushReadingSessionStats(book, seconds)
   }
 
-  function flushReadingSessionStats() {
-    const book = readingSessionBook
-    let remaining = readingSessionPendingSeconds
-    readingSessionPendingSeconds = 0
-    if (remaining <= 0) return
+  function newReadingEventId() {
+    if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+    // getRandomValues also works on the supported LAN HTTP web reader.
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    bytes[6] = (bytes[6]! & 0x0f) | 0x40
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80
+    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  }
 
+  function flushReadingSessionStats(book: NonNullable<typeof readingSessionBook>, remaining: number) {
     const total = remaining
     readingStats.value.totalSeconds += total
     persistStats()
 
-    const chunks: number[] = []
+    const now = new Date()
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
     while (remaining > 0) {
-      const chunk = Math.min(remaining, READING_STATS_FLUSH_CHUNK_SECONDS)
-      chunks.push(chunk)
-      remaining -= chunk
+      const seconds = Math.min(remaining, READING_STATS_FLUSH_CHUNK_SECONDS)
+      const event: ReadingEvent = { eventId: newReadingEventId(), seconds, date, ...book }
+      // One key per event prevents main/hover windows overwriting each other's queue.
+      localStorage.setItem(READING_EVENT_PREFIX + event.eventId, JSON.stringify(event))
+      remaining -= seconds
     }
-
-    readingStatsFlushQueue = readingStatsFlushQueue.then(async () => {
-      for (const chunk of chunks) {
-        await addReadingStats({
-          seconds: chunk,
-          bookUrl: book?.bookUrl,
-          bookName: book?.bookName,
-          bookAuthor: book?.bookAuthor,
-        }).catch(() => undefined)
-      }
-    })
+    queueReadingStatsFlush()
   }
+
+  function pendingReadingEventKeys() {
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key?.startsWith(READING_EVENT_PREFIX)) keys.push(key)
+    }
+    return keys
+  }
+
+  function queueReadingStatsFlush() {
+    readingStatsQueuedFlushes++
+    readingStatsFlushQueue = readingStatsFlushQueue.then(async () => {
+      for (const key of pendingReadingEventKeys()) {
+        const saved = localStorage.getItem(key)
+        if (!saved) continue
+        try {
+          const event = JSON.parse(saved) as ReadingEvent
+          await addReadingStats(event)
+          localStorage.removeItem(key)
+        } catch {
+          // Retain the event for the next settlement/restart. The server receipt
+          // makes replay safe even when a write succeeded but its reply was lost.
+          break
+        }
+      }
+    }).finally(() => { readingStatsQueuedFlushes-- })
+  }
+
+  // Recover unfinished writes even when reopening only the library/stats page.
+  if (pendingReadingEventKeys().length > 0) queueReadingStatsFlush()
 
   async function applyDesktopUpdate() {
     if (desktopUpdateLoading.value) return null
@@ -502,7 +547,7 @@ export const useAppStore = defineStore('app', () => {
       return
     }
 
-    const wasRunning = readingSessionStartedAt > 0
+    const wasRunning = readingSessionStartedAt !== null
     if (wasRunning) flushReadingSession()
     readingSessionBook = nextBook
     if (wasRunning) resumeReadingSessionClock()
@@ -514,9 +559,31 @@ export const useAppStore = defineStore('app', () => {
     resumeReadingSessionClock()
   }
 
+  function setReadingSessionHoverVisible(visible: boolean | null) {
+    readingSessionHoverVisible = visible
+    if (visible === false) pauseReadingSessionClock()
+    else resumeReadingSessionClock()
+  }
+
+  function setReadingSessionSuspended(suspended: boolean) {
+    readingSessionSuspended = suspended
+    if (suspended) pauseReadingSessionClock()
+    else resumeReadingSessionClock()
+  }
+
+  async function settleReadingSession() {
+    const wasRunning = readingSessionActive.value
+    flushReadingSession()
+    if (wasRunning) resumeReadingSessionClock()
+    if (readingStatsQueuedFlushes === 0) queueReadingStatsFlush()
+    await readingStatsFlushQueue
+  }
+
   function stopReadingSession() {
     pauseReadingSessionClock()
     readingSessionBook = null
+    readingSessionSuspended = false
+    readingSessionHoverVisible = null
     readingSessionActive.value = false
   }
 
@@ -661,6 +728,7 @@ export const useAppStore = defineStore('app', () => {
     updateDialogVisible, closeUpdateProgressDialog,
     isOnline, setOnlineStatus,
     readingStats, readingStatsSummary, startReadingSession, stopReadingSession, setReadingSessionBook,
+    setReadingSessionSuspended, setReadingSessionHoverVisible, settleReadingSession, readingSessionActive,
     markBookOpened, markChapterRead,
     toasts, showToast, dismissToast,
     confirmState, confirmDialog, resolveConfirm,

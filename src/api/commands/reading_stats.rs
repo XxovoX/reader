@@ -8,6 +8,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddReadingStatsRequest {
+    pub event_id: Option<String>,
     pub seconds: Option<i64>,
     pub characters: Option<i64>,
     pub date: Option<String>,
@@ -24,7 +25,7 @@ pub async fn add_reading_stats_core(
     let user_ns = "default";
     state
         .reading_stats_service
-        .add_reading(
+        .add_reading_once(
             user_ns,
             req.seconds.unwrap_or(0),
             req.characters.unwrap_or(0),
@@ -32,6 +33,7 @@ pub async fn add_reading_stats_core(
             req.book_url.as_deref(),
             req.book_name.as_deref(),
             req.book_author.as_deref(),
+            req.event_id.as_deref(),
         )
         .await?;
     Ok(ApiResponse::ok(serde_json::json!({ "saved": true })))
@@ -53,7 +55,10 @@ pub async fn get_reading_stats_daily(
     end: String,
 ) -> Result<ApiResponse<Vec<DailyReadingStats>>, AppError> {
     let user_ns = "default";
-    let daily = state.reading_stats_service.get_daily(user_ns, &start, &end).await?;
+    let daily = state
+        .reading_stats_service
+        .get_daily(user_ns, &start, &end)
+        .await?;
     Ok(ApiResponse::ok(daily))
 }
 

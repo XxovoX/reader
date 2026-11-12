@@ -36,6 +36,10 @@ export const tauriTransport: Transport = {
  * `api/bookshelf.ts` 直接 invoke, 不走通用通道。
  */
 export const COMMAND_BY_PATH: Record<string, string> = {
+  '/reader3/addReadingStats': 'add_reading_stats',
+  '/reader3/testLegadoWebdav': 'test_legado_webdav',
+  '/reader3/syncLegadoBookProgress': 'sync_legado_book_progress',
+  '/reader3/uploadLegadoBookProgress': 'upload_legado_book_progress',
   '/reader3/getBookSources': 'get_book_sources',
   '/reader3/setBookSourceCookie': 'set_book_source_cookie',
   '/reader3/testBookSources': 'test_book_sources',

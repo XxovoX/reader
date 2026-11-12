@@ -76,6 +76,15 @@
         <div v-if="!isSearch && serverCachedCount > 0" class="book-cache-row">
           <span v-if="serverCachedCount > 0" class="cache-chip">本地 {{ serverCachedCount }} 章</span>
         </div>
+        <button
+          v-if="showHoverAction && !editMode && !isSearch"
+          class="hover-read-btn"
+          type="button"
+          title="以透明悬浮模式阅读"
+          @click.stop="$emit('hover', book)"
+        >
+          悬浮阅读
+        </button>
         <!-- Search mode: add to shelf -->
         <button
           v-if="isSearch"
@@ -108,6 +117,7 @@ const props = defineProps<{
   inShelf?: boolean
   dragging?: boolean
   showDeleteAction?: boolean
+  showHoverAction?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -115,6 +125,7 @@ const emit = defineEmits<{
   info: [book: Book | SearchBook]
   delete: [book: Book | SearchBook]
   addToShelf: [book: Book | SearchBook]
+  hover: [book: Book | SearchBook]
   select: [book: Book | SearchBook]
 }>()
 
@@ -533,6 +544,23 @@ const sourceCount = computed(() => {
   gap: 6px;
   min-width: 0;
   flex: 1 1 auto;
+}
+
+.hover-read-btn {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.hover-read-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
 }
 
 .cache-chip {

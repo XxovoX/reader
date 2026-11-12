@@ -88,9 +88,8 @@ fn upload_router(state: AppState) -> Router<AppState> {
 
 /// 组装完整的 axum 路由。
 ///
-/// `options` 目前只影响监听地址(在 `WebServer::start` 里已用完), 路由本身
-/// 不再依赖任何鉴权配置 —— 与手机端一致, 不做账号体系。
-pub fn build(state: AppState, _options: WebOptions, static_source: Option<StaticSource>) -> Router {
+/// 普通阅读接口不做账号体系；工作区的备份/WebDAV 接口只在本机模式挂载。
+pub fn build(state: AppState, options: WebOptions, static_source: Option<StaticSource>) -> Router {
     let api = Router::new()
         // ─── 书架与阅读 ───
         .route("/reader3/getBookshelf", get(get_bookshelf))
@@ -158,6 +157,7 @@ pub fn build(state: AppState, _options: WebOptions, static_source: Option<Static
         // `api` 路由的 layer：逐条 `.route(...)` 上挂要写 28 次，漏一个就又是
         // 2MB。上传路由自带更严的 multipart 上限，叠加后取较小者，不受影响。
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT_BYTES))
+        .merge(super::workspace::router(!options.lan))
         .with_state(state);
 
     // 不做鉴权, 与手机端 Legado 的 HTTP Server 一致:
@@ -180,7 +180,7 @@ async fn health() -> impl IntoResponse {
 /// 前端传输层 (`api/transport/http.ts`) 依赖这个信封解包, 与 Tauri 侧的
 /// `invoke` 解包逻辑共用同一段代码 —— 所以这里必须保持 `{isSuccess,errorMsg,data}`
 /// 的形状, 不能改成 REST 风格的状态码约定。
-fn envelope<T: serde::Serialize>(result: Result<ApiResponse<T>, AppError>) -> Response {
+pub(super) fn envelope<T: serde::Serialize>(result: Result<ApiResponse<T>, AppError>) -> Response {
     match result {
         Ok(body) => Json(body).into_response(),
         Err(err) => {
@@ -426,7 +426,7 @@ async fn delete_book_sources(
 /// 桌面端走的是 Tauri 的 octet-stream 快速通道 + `x-reader-file-name` header;
 /// 浏览器里没有这套约定, 用标准 multipart 最省事, 前端 `http.ts` 的
 /// `upload()` 直接 `FormData` 即可。
-async fn read_upload(
+pub(super) async fn read_upload(
     multipart: &mut axum::extract::Multipart,
 ) -> Result<(String, Vec<u8>), Response> {
     while let Some(field) = multipart.next_field().await.map_err(|err| {

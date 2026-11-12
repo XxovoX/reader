@@ -1891,6 +1891,7 @@ export const useReaderStore = defineStore('reader', () => {
     const webdav = appStore.legadoWebdavConfig
     if (!webdav.url || !webdav.account || !webdav.password) return null
     const plainContentLength = Math.max(1, (contentOverride ?? content.value).replace(/<[^>]+>/g, '').length)
+    const requestedScrollProgress = chapterScrollProgress.value
     const progressPosition = Math.max(0, Math.min(plainContentLength,
       Math.round(chapterScrollProgress.value * plainContentLength)))
     const progress: LegadoBookProgress = {
@@ -1914,6 +1915,10 @@ export const useReaderStore = defineStore('reader', () => {
         && remote.durChapterPos > progress.durChapterPos)
     if (!remoteIsNewer) return result
     if (!applyRemoteProgress) return result
+    // A slow request may finish after the user has moved within this book.
+    // Keep their latest reading position; a later sync can compare it again.
+    if (currentIndex.value !== progress.durChapterIndex
+      || chapterScrollProgress.value !== requestedScrollProgress) return result
 
     // 手机端直接使用 durChapterIndex。标题只用于显示，不能参与定位，
     // 否则章节标题重复或书源标题变化时会跳到错误章节。
@@ -1978,8 +1983,8 @@ export const useReaderStore = defineStore('reader', () => {
 
   async function restoreCurrentBookProgressFromLegado(
     contentOverride?: string,
-    expectedBookUrl?: string,
-    expectedBookLoadRequestId?: number,
+    expectedBookUrl = book.value?.bookUrl,
+    expectedBookLoadRequestId = bookLoadRequestId,
   ) {
     restoringLegadoProgress.value = true
     try {

@@ -80,6 +80,43 @@
                   @click="appStore.setLegadoSyncEnabled(!appStore.legadoSyncEnabled)"
                 ><span></span></button>
               </div>
+              <section class="reading-time-merge">
+                <div class="panel-heading">
+                  <div>
+                    <h3>合并 Mac 阅读时长到手机</h3>
+                    <p>选择开源阅读 3.22.031722 的最新完整备份，生成可在手机恢复的副本。</p>
+                  </div>
+                  <label class="action-btn reading-time-file" :class="{ disabled: mergingReadingTime }">
+                    {{ mergingReadingTime ? '处理中...' : '选择手机备份 ZIP' }}
+                    <input type="file" accept=".zip,application/zip" :disabled="mergingReadingTime" @change="mergeReadingTime" />
+                  </label>
+                </div>
+                <div v-if="mergedReadingTime" class="merged-reading-time">
+                  <span>已合并 Mac 累计 {{ formatDuration(mergedReadingTime.macSeconds) }}</span>
+                  <button class="action-btn primary" type="button" @click="downloadMergedBackup(mergedReadingTime)">
+                    下载 {{ mergedReadingTime.filename }}
+                  </button>
+                </div>
+                <p class="reading-time-hint">恢复完整备份会同时恢复备份时的书架和设置；请保留手机原备份。</p>
+              </section>
+              <section class="phone-library-import">
+                <div class="panel-heading">
+                  <div>
+                    <h3>导入手机书架</h3>
+                    <p>从开源阅读完整备份导入缺少的在线书籍和书源；本地书籍正文需单独导入。</p>
+                  </div>
+                  <label class="action-btn reading-time-file" :class="{ disabled: importingPhoneLibrary }">
+                    {{ importingPhoneLibrary ? '读取中...' : '读取备份 ZIP' }}
+                    <input type="file" accept=".zip,application/zip" :disabled="importingPhoneLibrary" @change="previewPhoneLibrary" />
+                  </label>
+                </div>
+                <div v-if="phoneLibrary" class="merged-reading-time">
+                  <span>读取到 {{ phoneLibrary.books.length }} 本书、{{ phoneLibrary.sources.length }} 个书源</span>
+                  <button class="action-btn primary" type="button" :disabled="importingPhoneLibrary" @click="importPhoneLibrary">
+                    {{ importingPhoneLibrary ? '导入中...' : '导入缺少的在线书籍与书源' }}
+                  </button>
+                </div>
+              </section>
               <div v-if="remoteError" class="notice error remote-error">{{ remoteError }}</div>
               <div v-if="remoteLoading" class="empty-state compact-empty">正在读取网盘备份...</div>
               <div v-else-if="remoteConfigured && remoteBackups.length === 0" class="empty-state compact-empty">网盘中暂无备份文件</div>
@@ -212,6 +249,12 @@
 import { computed, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import { toError } from '../api/invoke'
+import { invokeUpload } from '../api/invoke'
+import { mergeLegadoReadingTime, downloadMergedBackup, type MergedReadingTimeBackup } from '../api/legadoTime'
+import { getBookSources, saveBookSources } from '../api/source'
+import { saveBooks } from '../api/bookshelf'
+import { useBookshelfStore } from '../stores/bookshelf'
+import type { Book, BookSource } from '../types'
 import {
   createWebdavBackupArchive,
   deleteWebdavFile,
@@ -254,6 +297,7 @@ const emit = defineEmits<{
 }>()
 
 const appStore = useAppStore()
+const bookshelfStore = useBookshelfStore()
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const activeBackupTab = ref<'local' | 'webdav'>('local')
 const currentPath = ref('/')
@@ -269,6 +313,10 @@ const remoteLoading = ref(false)
 const remoteWorking = ref(false)
 const remoteAction = ref<'test' | 'upload' | 'restore' | 'download' | 'delete' | ''>('')
 const remoteError = ref('')
+const mergingReadingTime = ref(false)
+const mergedReadingTime = ref<MergedReadingTimeBackup | null>(null)
+const importingPhoneLibrary = ref(false)
+const phoneLibrary = ref<{ books: Book[]; sources: BookSource[] } | null>(null)
 const remoteConfigured = computed(() => Boolean(
   remoteDraft.value.url.trim() && remoteDraft.value.account.trim() && remoteDraft.value.password,
 ))
@@ -319,6 +367,73 @@ function saveRemoteConfig() {
   appStore.setLegadoWebdavConfig({ ...remoteDraft.value, directory: remoteDraft.value.directory?.trim() || 'legado' })
   appStore.showToast('WebDAV 配置已保存', 'success')
   remoteError.value = ''
+}
+
+function formatDuration(seconds: number) {
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor(seconds % 3600 / 60)
+  return `${hours} 小时 ${minutes} 分 ${seconds % 60} 秒`
+}
+
+async function mergeReadingTime(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  mergingReadingTime.value = true
+  mergedReadingTime.value = null
+  remoteError.value = ''
+  try {
+    await appStore.settleReadingSession()
+    mergedReadingTime.value = await mergeLegadoReadingTime(file)
+  } catch (error) {
+    remoteError.value = errorMessageOf(error, '合并阅读时长失败')
+  } finally {
+    mergingReadingTime.value = false
+  }
+}
+
+async function previewPhoneLibrary(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  importingPhoneLibrary.value = true
+  phoneLibrary.value = null
+  remoteError.value = ''
+  try {
+    if (file.size > 128 * 1024 * 1024) throw new Error('备份不能超过 128MB')
+    phoneLibrary.value = await invokeUpload('inspect_legado_library', {
+      'x-reader-file-name': encodeURIComponent(file.name),
+    }, file)
+  } catch (error) {
+    remoteError.value = errorMessageOf(error, '读取手机备份失败')
+  } finally {
+    importingPhoneLibrary.value = false
+  }
+}
+
+async function importPhoneLibrary() {
+  if (!phoneLibrary.value) return
+  importingPhoneLibrary.value = true
+  remoteError.value = ''
+  try {
+    const existingSources = new Set((await getBookSources()).map(source => source.bookSourceUrl))
+    const sources = phoneLibrary.value.sources.filter(source => !existingSources.has(source.bookSourceUrl))
+    if (sources.length) await saveBookSources(sources)
+    const existingBookUrls = new Set(bookshelfStore.books.map(book => book.bookUrl))
+    const books = phoneLibrary.value.books.filter(book =>
+      book.origin && book.origin !== 'loc_book' && /^https?:/.test(book.bookUrl) && !existingBookUrls.has(book.bookUrl),
+    )
+    if (books.length) await saveBooks(books)
+    await bookshelfStore.fetchBooks({ prefetch: false })
+    appStore.showToast(`已导入 ${books.length} 本在线书籍、${sources.length} 个书源`, 'success')
+    phoneLibrary.value = null
+  } catch (error) {
+    remoteError.value = errorMessageOf(error, '导入手机书架失败')
+  } finally {
+    importingPhoneLibrary.value = false
+  }
 }
 
 async function testRemote() {
@@ -781,6 +896,45 @@ async function restoreBackup(entry: EntryRow) {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-lg);
   background: var(--color-bg-sunken);
+}
+
+.reading-time-merge {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-divider);
+}
+
+.reading-time-file {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+
+.reading-time-file input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.reading-time-file.disabled { opacity: .5; cursor: wait; }
+
+.merged-reading-time {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.reading-time-hint {
+  margin: var(--space-2) 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
 }
 
 .panel-heading {

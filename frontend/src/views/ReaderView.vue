@@ -1,9 +1,11 @@
 <template>
   <div
     class="reader-view"
-    :class="{ 'disable-system-callout': disableSystemCallout }"
+    :class="{ 'disable-system-callout': disableSystemCallout, 'codex-reader': workspaceMode, 'codex-covered': workspaceCovered, 'hover-reader': hoverMode, 'hover-reader-hidden': hoverMode && !hover.visible.value }"
     :style="{
-      background: shellPaintsBackground ? 'transparent' : theme.body,
+      background: hoverMode ? 'transparent' : shellPaintsBackground ? 'transparent' : theme.body,
+      '--hover-font-size': hover.fontSize.value + 'px',
+      '--hover-font-color': hover.lightText.value ? '#ffffff' : '#303030',
       color: theme.fontColor,
       colorScheme: readerColorScheme,
       fontFamily: currentFontFamily,
@@ -13,15 +15,34 @@
     }"
     @click="handleBackgroundClick"
     @pointermove="handleReaderPointerMove"
-    @pointerleave="handleReaderPointerLeave"
-    @contextmenu.prevent="handleContextMenu"
+    @contextmenu.prevent="hoverMode ? (hover.menu.value = true) : handleContextMenu($event)"
+    @pointerleave="!hoverMode && handleReaderPointerLeave($event)"
+    @mousedown.capture="hover.drag($event)"
   >
 
+    <HoverResizeHandles v-if="hoverMode" @resize="hover.resize" />
+    <div v-if="workspaceMode && !hoverMode" class="codex-reader-bar" @click.stop>
+      <button @click="goHome">‹ 工作区</button>
+      <div><button @click="store.togglePanel('catalog')">目录</button><button :disabled="workspaceSyncing" @click="syncWorkspaceProgress">{{ workspaceSyncStatus }}</button><button @click="coverWorkspace">隐藏 <kbd>Esc</kbd></button></div>
+    </div>
+    <div v-if="hoverMode && hover.menu.value && hover.visible.value" class="hover-reader-menu" @click.stop @contextmenu.prevent.stop>
+      <button @mousedown.prevent.stop="hover.drag()">拖动位置</button>
+      <button @click="hover.changeFont(1)">增大字号</button>
+      <button @click="hover.changeFont(-1)">减小字号</button>
+      <button @click="hover.resetFont()">恢复 Codex 字体</button>
+      <button @click="hover.toggleTextColor()">切换深 / 浅文字</button>
+      <button @click="prevChapter(); hover.menu.value = false">上一章</button>
+      <button @click="nextChapter(); hover.menu.value = false">下一章</button>
+      <button @click="hover.back()">返回书架</button>
+    </div>
+    <div v-if="workspaceCovered && !hoverMode" class="codex-reader-cover" role="dialog" aria-modal="true" aria-label="工作记录" @click.stop>
+      <div class="codex-cover-content"><span>›_</span><h1>工作记录</h1><p>当前没有待处理的任务。</p><button @click="resumeWorkspace">继续</button></div>
+    </div>
     <!-- 章节加载阶段：Teleport 到 body，避免被阅读容器的层叠/定位影响 -->
     <Teleport to="body">
       <Transition name="fade">
         <div
-          v-if="loadStageText"
+          v-if="loadStageText && !workspaceCovered"
           class="chapter-loading-stage"
           :style="{ background: chromeTheme.popup, color: chromeTheme.fontColor }"
         >
@@ -72,6 +93,7 @@
       (见 backups/2026-10-05-review-fixes/)。
     -->
     <ReaderMobileControls
+      v-if="!workspaceMode"
       :show="showControls || !!store.activePanel"
       :mini="appStore.miniMode"
       :can-add-to-shelf="canAddToShelf"
@@ -148,6 +170,8 @@
     <!-- Main Content Area -->
     <div
       class="reader-scroll-container"
+      :inert="workspaceCovered || (hoverMode && !hover.visible.value)"
+      :aria-hidden="workspaceCovered || (hoverMode && !hover.visible.value)"
       :class="{
         'horizontal-page-mode': isHorizontalPageMode,
         'tts-panel-open': ttsPanelOpen,
@@ -445,7 +469,11 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
-import { onBeforeRouteLeave, useRouter } from 'vue-router'
+import { invoke } from '@tauri-apps/api/core'
+import { isTauriRuntime } from '../api/transport'
+import HoverResizeHandles from '../components/HoverResizeHandles.vue'
+import { useHoverReader } from '../composables/useHoverReader'
+import { onBeforeRouteLeave, useRouter, useRoute } from 'vue-router'
 import { useReaderStore, fontPresets, TOC_END_CHECK_INTERVAL_MS } from '../stores/reader'
 import { useAppStore } from '../stores/app'
 import { useBookshelfStore } from '../stores/bookshelf'
@@ -533,6 +561,18 @@ type TtsPanelState = 'expanded' | 'bar' | 'bubble'
 const ReaderSearchPanel = defineAsyncComponent(() => import('../components/reader/ReaderSearchPanel.vue'))
 
 const router = useRouter()
+const route = useRoute()
+const hoverMode = route.query.mode === 'hover'
+const workspaceMode = computed(() => route.query.mode === 'codex' || hoverMode)
+const workspaceCovered = ref(route.query.covered === '1')
+const hover = useHoverReader(hoverMode, async () => {
+  captureProgressForSync()
+  await appStore.settleReadingSession()
+  await store.flushProgressToServerKeepalive(true)
+})
+const workspaceSyncing = ref(false)
+const workspaceSyncStatus = ref('同步')
+let workspaceSyncTimer: ReturnType<typeof setInterval> | null = null
 const store = useReaderStore()
 const appStore = useAppStore()
 const shelfStore = useBookshelfStore()
@@ -556,7 +596,48 @@ function sourceClickLog(message: string, payload?: unknown) {
   console.log('[source-click]', message, payload ?? '')
 }
 
-const config = computed(() => store.config)
+const config = computed(() => workspaceMode.value ? {
+  ...store.config, readMethod: '上下滑动' as const, fontSize: 15,
+  fontWeight: 400, lineHeight: 1.85, pageWidth: 800, paragraphSpacing: 1,
+} : store.config)
+
+function coverWorkspace() {
+  captureProgressForSync()
+  workspaceCovered.value = true
+  void router.replace({ query: { ...route.query, covered: '1' } })
+  appStore.setReadingSessionSuspended(true)
+  stopAutoScroll()
+  store.stopTTS()
+  store.closePanel()
+  showSearch.value = false
+  showBookInfo.value = false
+  showClickAreaSettings.value = false
+  closeReplaceDialog()
+  selectionMenu.value.visible = false
+  showTTSPanel.value = false
+  showControls.value = false
+  closeReaderContextMenu()
+  window.getSelection()?.removeAllRanges()
+  void syncWorkspaceProgress()
+}
+function resumeWorkspace() {
+  workspaceCovered.value = false
+  const { covered: _covered, ...query } = route.query
+  void router.replace({ query })
+  appStore.setReadingSessionSuspended(false)
+}
+async function syncWorkspaceProgress() {
+  if (workspaceSyncing.value) return
+  if (!appStore.legadoSyncEnabled) { workspaceSyncStatus.value = '未启用同步'; return }
+  workspaceSyncing.value = true
+  workspaceSyncStatus.value = '同步中…'
+  try {
+    captureProgressForSync()
+    const result = await store.restoreCurrentBookProgressFromLegado()
+    workspaceSyncStatus.value = result ? '已同步' : '检查同步设置'
+  } catch { workspaceSyncStatus.value = '同步失败，点击重试' }
+  finally { workspaceSyncing.value = false }
+}
 /**
  * 章节加载阶段文案。
  *
@@ -691,6 +772,7 @@ function readerOverlayOpen() {
 }
 
 function handleReaderPointerMove(event: PointerEvent) {
+  if (workspaceMode.value) return
   // 触摸不产生「悬停」语义, 仍走点击呼出。这里要先把指针状态清掉: 触摸屏笔记本上
   // 鼠标可能刚把状态留成"停在热区里", 不清就会与点击后的静默叠加成死角。
   if (!supportsHoverPointer.value || event.pointerType === 'touch') {
@@ -1950,7 +2032,7 @@ function goHome() {
   } catch {
     // Ignore unavailable session storage; navigation should still work.
   }
-  router.replace('/')
+  router.replace(workspaceMode.value ? '/workspace' : '/')
 }
 
 /**
@@ -2931,6 +3013,7 @@ function scrollPageBy(container: HTMLElement, delta: number) {
 
 // Click behavior
 function handleBackgroundClick(e: Event) {
+  if (hoverMode) { hover.menu.value = false; return }
   // If clicked directly on the reader-view wrapper, toggle controls
   if ((e.target as HTMLElement).classList.contains('reader-view')) {
     collapseControlsByClick()
@@ -3089,6 +3172,7 @@ async function refreshFromContextMenu() {
 }
 
 function handleGlobalClick(e: MouseEvent) {
+  if (workspaceMode.value) return
   if (store.activePanel) return
   closeReaderContextMenu()
   if (suppressNextReaderClick.value) {
@@ -3668,6 +3752,16 @@ function isKeyboardHotkeyBlocked(): boolean {
  *  中键/侧键用的是 isMouseButtonHotkeyBlocked —— 规则与滚轮不同, 原因见那里的说明。 */
 
 function handleKeydown(e: KeyboardEvent) {
+  if (hoverMode && e.key === 'Escape') {
+    hover.leave()
+    return
+  }
+  if (workspaceMode.value && e.key === 'Escape') {
+    e.preventDefault()
+    coverWorkspace()
+    return
+  }
+  if (workspaceCovered.value) return
   const keyId = hotkeyIdFromEvent(e)
   if (!keyId) return
   // 「返回」不受输入框限制。搜索面板一打开就把焦点放进输入框, 若连 Esc 也拦掉,
@@ -3949,7 +4043,29 @@ let horizontalWheelLockUntil = 0
 /** 滚轮快捷键的节流: 一次物理滚动会产生一串 wheel 事件, 不节流会连续翻很多页。 */
 let wheelHotkeyLockUntil = 0
 
+let hoverChapterWheelLockUntil = 0
 function handleReaderWheel(event: WheelEvent) {
+  if (hoverMode) {
+    if (!hover.visible.value || hover.menu.value || store.loading) return
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault()
+      hover.changeFont(event.deltaY < 0 ? 1 : -1)
+      return
+    }
+    const container = scrollContainerRef.value
+    if (!container || Math.abs(event.deltaY) < 2) return
+    const atEnd = container.scrollTop + container.clientHeight >= container.scrollHeight - 2
+    const atStart = container.scrollTop <= 1
+    if ((event.deltaY > 0 && atEnd && store.hasNext) || (event.deltaY < 0 && atStart && store.currentIndex > 0)) {
+      event.preventDefault()
+      if (Date.now() < hoverChapterWheelLockUntil) return
+      hoverChapterWheelLockUntil = Date.now() + 700
+      if (event.deltaY > 0) void nextChapter()
+      else void prevChapter()
+    }
+    return
+  }
+  if (workspaceCovered.value) return
   if (isPointerHotkeyBlocked(event.target)) return
 
   // 滚轮快捷键优先于内置滚轮行为(分页模式翻页 / Ctrl+滚轮改字号):
@@ -4007,15 +4123,35 @@ function handleReaderWheel(event: WheelEvent) {
 }
 
 onMounted(async () => {
+  if (workspaceMode.value) {
+    document.title = '工作记录'
+    workspaceSyncTimer = setInterval(() => {
+      if (!workspaceCovered.value && appStore.readingSessionActive) {
+        void appStore.settleReadingSession()
+        void syncWorkspaceProgress()
+      }
+    }, 30_000)
+  }
   syncViewportSize()
+  if (hoverMode && isTauriRuntime() && !store.book) {
+    try {
+      const selected = await invoke<import('../types').Book>('get_hover_reader_book')
+      await store.loadBook(selected)
+    } catch {
+      await invoke('return_from_hover_reader')
+      return
+    }
+  }
   if (!store.book) {
     const restored = await store.restorePersistedSession()
     if (!restored) {
-      router.replace('/')
+      router.replace(workspaceMode.value ? '/workspace' : '/')
       return
     }
-    appStore.showToast('已恢复最近阅读的离线章节', 'success')
+    if (!workspaceMode.value) appStore.showToast('已恢复最近阅读的离线章节', 'success')
   }
+  if (hoverMode) appStore.setReadingSessionHoverVisible(hover.visible.value)
+  if (workspaceCovered.value) appStore.setReadingSessionSuspended(true)
   appStore.startReadingSession(store.book?.bookUrl, store.book?.name, store.book?.author)
   void store.fetchCustomFonts().catch(() => undefined)
   // 「加入书架」入口要判断这本书在不在书架。直接开书进来时书架可能还没拉过，
@@ -4031,6 +4167,7 @@ onMounted(async () => {
   // 变化监听 —— 本地 PDF 的页面渲染要在这里补一次。
   void renderPdfPagesIfNeeded()
   loadSavedReadingPosition()
+  if (hoverMode) await hover.ready()
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('wheel', handleReaderWheel, { passive: false })
   // 鼠标键(中键/侧键)可绑快捷键。捕获阶段: 要抢在 WebView2 的中键自动滚动与
@@ -4099,6 +4236,7 @@ onUnmounted(() => {
   // 离开阅读器: PDF 文档不再需要, 释放它占的内存
   if (store.book?.bookUrl) void releasePdfBook(store.book.bookUrl)
   cancelPageScrollAnimation(scrollContainerRef.value)
+  if (workspaceSyncTimer) clearInterval(workspaceSyncTimer)
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('wheel', handleReaderWheel)
   window.removeEventListener('mousedown', handleReaderMouseDown, true)
@@ -5303,4 +5441,54 @@ watch(
 
 .fade-slide-left-enter-active, .fade-slide-left-leave-active { transition: all 0.3s ease; }
 .fade-slide-left-enter-from, .fade-slide-left-leave-to { transform: translateX(20px); opacity: 0; }
+</style>
+
+<style scoped>
+.codex-reader { background:#fff !important; color:#292929 !important; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif !important; }
+.codex-reader-bar { position:absolute; inset:0 0 auto; z-index:50; height:58px; display:flex; align-items:center; justify-content:space-between; padding:0 24px; background:#fff; color:#777; font:12px/1.5 -apple-system,BlinkMacSystemFont,sans-serif; border-bottom:1px solid #f1f1f1; }
+.codex-reader-bar button, .codex-reader-cover button { background:none; border:0; color:inherit; padding:8px; cursor:pointer; font:inherit; border-radius:6px; }
+.codex-reader-bar button:hover { background:#f5f5f5; color:#222; }
+.codex-reader-bar kbd { margin-left:4px; color:#999; font:10px/1.4 monospace; }
+.codex-reader .reader-scroll-container { padding-top:58px; box-sizing:border-box; }
+.codex-reader .reader-scroll-container[aria-hidden=true] { visibility:hidden; }
+.codex-reader .chapter-content { padding:36px 32px 80px; font-family:inherit !important; color:#292929; }
+.codex-reader .chapter-title { display:none; }
+.codex-reader :deep(.chapter-text p) { text-indent:0 !important; margin:0 0 1.1em; }
+.codex-reader .chapter-text { font-family:inherit !important; }
+.codex-reader-cover { position:absolute; inset:0; z-index:1000; background:#fff; color:#292929; font:14px/1.7 -apple-system,BlinkMacSystemFont,sans-serif; }
+.codex-cover-content { max-width:736px; padding:90px 32px; margin:auto; }
+.codex-cover-content > span { font-size:24px; color:#888; }
+.codex-cover-content h1 { font-size:21px; font-weight:550; margin:32px 0 10px; }
+.codex-cover-content p { color:#888; margin-bottom:20px; }
+.codex-cover-content button { border:1px solid #ddd; padding:7px 14px; }
+</style>
+
+<style>
+body:has(.codex-covered) .reader-overlay,
+body:has(.codex-covered) .reader-drawer,
+body:has(.codex-covered) .chapter-loading-stage,
+body:has(.codex-covered) .reader-replace-overlay,
+body:has(.codex-covered) .modal-overlay,
+body:has(.codex-covered) .toast-container { display:none !important; }
+.codex-covered > :not(.codex-reader-cover) { visibility:hidden !important; pointer-events:none !important; }
+</style>
+
+<style scoped>
+.hover-reader :deep(*) { transition:none !important; animation:none !important; }
+.hover-reader { position:fixed; inset:0; width:100vw; height:100dvh; background:transparent !important; color:var(--hover-font-color) !important; opacity:1; visibility:visible; transition:opacity 140ms ease, visibility 140ms step-start; }
+.hover-reader-hidden { opacity:0; visibility:hidden !important; transition:opacity 140ms ease, visibility 140ms step-end; }
+@media (prefers-reduced-motion: reduce) { .hover-reader, .hover-reader-hidden { transition:none; } }
+.hover-reader .reader-scroll-container { padding:0 !important; background:transparent !important; scrollbar-width:none; }
+.hover-reader .chapter-content { padding:8px 14px 12px !important; max-width:none !important; min-height:100%; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif !important; font-size:var(--hover-font-size) !important; font-weight:400 !important; letter-spacing:normal !important; line-height:1.625 !important; color:var(--hover-font-color) !important; }
+.hover-reader :deep(.chapter-text p) { margin:0 !important; }
+.hover-reader :deep(.chapter-text p + p) { margin-top:1em !important; }
+.hover-reader .chapter-text { font-size:inherit !important; font-family:inherit !important; line-height:inherit !important; }
+.hover-reader :deep(.chapter-text *) { font-family:inherit !important; font-weight:inherit !important; line-height:inherit !important; letter-spacing:normal !important; }
+.hover-reader :deep(.chapter-text *) { color:var(--hover-font-color) !important; background:transparent !important; font-size:inherit !important; }
+.hover-reader :deep(img), .hover-reader :deep(svg), .hover-reader .next-chapter-btn,
+.hover-reader .chapter-nav, .hover-reader .next-btn, .hover-reader .chapter-title,
+.hover-reader .auto-reading-status { display:none !important; }
+.hover-reader-menu { position:absolute; z-index:2000; right:6px; top:4px; max-height:calc(100dvh - 8px); overflow-y:auto; box-sizing:border-box; display:grid; grid-template-columns:1fr 1fr; gap:2px; padding:6px; background:#fff; border:1px solid #ddd; border-radius:6px; color:#333; font:12px/1.4 -apple-system,sans-serif; }
+.hover-reader-menu button { padding:6px 10px; text-align:left; }
+.hover-reader-menu button:hover { background:#eee; }
 </style>

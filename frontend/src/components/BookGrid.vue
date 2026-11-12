@@ -45,11 +45,13 @@
           :in-shelf="isBookInShelf(item)"
           :dragging="sortable && draggedUrl === item.bookUrl"
           :show-delete-action="showDeleteAction"
+          :show-hover-action="showHoverAction"
           @click="$emit('click', $event)"
           @info="$emit('info', $event)"
           @delete="$emit('delete', $event)"
           @select="$emit('select', $event)"
           @addToShelf="$emit('addToShelf', $event)"
+          @hover="$emit('hover', $event)"
         />
       </div>
     </component>
@@ -99,6 +101,7 @@ const props = withDefaults(defineProps<{
   emptyText?: string
   sortable?: boolean
   showDeleteAction?: boolean
+  showHoverAction?: boolean
   /**
    * 是否启用卡片进出/位移过渡。
    *
@@ -129,6 +132,7 @@ const emit = defineEmits<{
   delete: [book: Book | SearchBook]
   select: [book: Book | SearchBook]
   addToShelf: [book: Book | SearchBook]
+  hover: [book: Book | SearchBook]
   contextmenu: [{ book: Book | SearchBook; event: MouseEvent }]
   reorder: [payload: { draggedUrl: string; targetUrl: string }]
 }>()

@@ -151,3 +151,7 @@ mod tests {
         assert!(decode_upload_body(&out_of_range).is_err());
     }
 }
+
+pub mod legado_time;
+
+pub mod hover_reader;

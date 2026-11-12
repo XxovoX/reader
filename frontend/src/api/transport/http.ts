@@ -21,6 +21,7 @@ async function request(path: string, init: RequestInit): Promise<Response> {
   const response = await fetch(path, {
     credentials: 'same-origin',
     ...init,
+    headers: { ...init.headers, 'x-reader-local': '1' },
   })
   return response
 }
@@ -76,6 +77,8 @@ export const httpTransport: Transport = {
 
 /** Web 端支持的上传命令 → 路由。 */
 const UPLOAD_ROUTES: Record<string, string> = {
+  inspect_legado_library: '/reader3/inspectLegadoLibrary',
+  merge_legado_reading_time: '/reader3/mergeLegadoReadingTime',
   upload_txt_book: '/reader3/uploadTxtBook',
   upload_epub_book: '/reader3/uploadEpubBook',
   upload_pdf_book: '/reader3/uploadPdfBook',

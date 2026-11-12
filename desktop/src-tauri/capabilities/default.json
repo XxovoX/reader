@@ -1,7 +1,10 @@
 {
   "identifier": "default",
   "description": "The UI is served by Tauri's asset protocol and calls app-defined IPC commands (allowed by default) plus core APIs.",
-  "windows": ["main"],
+  "windows": [
+    "main",
+    "hover-reader"
+  ],
   "permissions": [
     "core:default",
     "core:window:default",
